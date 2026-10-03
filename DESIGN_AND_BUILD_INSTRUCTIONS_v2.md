@@ -44,6 +44,8 @@ Note: "asynchronous job polling" stays out of scope for v2 — see section 2 for
 | ACA scaling | Consumption workload profile, `minReplicas: 0`, `maxReplicas: 3`–`5`, HTTP concurrent requests: `1` per replica | Lowest idle cost while giving headroom for multiple simultaneous uploads from the Svelte app. Cold starts are expected. |
 | Network exposure | External HTTPS ingress plus bearer authentication initially | Simple and usable from personal projects. An internal-only ACA requires VNet-connected callers and adds infrastructure. |
 
+**Cost precedence rule:** Cost/price trumps every other preference in this document, including the managed-identity-over-passwords preference for registry access. When a cheaper or free option exists and the trade-off is acceptable for a private, personal-scale service, choose it. Stay inside free tiers and free grants wherever possible, and flag any resource that would incur a fixed monthly charge before creating it. Registry: use **GitHub Container Registry (GHCR)**, not Azure Container Registry (ACR, which has no free tier).
+
 Cost is not guaranteed to be zero: the ACA free grant, image registry, Log Analytics retention, network egress, and OCR CPU time all affect billing. A few thousand small conversions can be inexpensive, but set an Azure budget alert before deployment.
 
 **Why not a true async job queue?** A job model (`202 Accepted` + job ID + polling) would give the most headroom for spiky multi-user load, but it requires somewhere to park the finished DOCX until the client polls for it — which reintroduces the storage/state this design deliberately avoids, and adds real implementation cost during early development. Treat it as an escape hatch: only build it if real usage shows requests routinely queuing for a long time even with multiple replicas and the bounded queue below.
@@ -140,6 +142,10 @@ Each response also corresponds to a structured, safe server-side log line (reque
 
 Do not write PDF or DOCX bytes to application logs. Do not use `/tmp` as a cache.
 
+### Implementation finding: invisible OCR text (verified during build)
+
+OCRmyPDF stores recognised text as an *invisible* text layer. `pdf2docx` ignores invisible text by default (`ocr=0`), so a scanned page would otherwise convert to a bare picture with no editable text. Its `ocr=2` mode keeps only invisible text (and drops the page image) but would discard native text on the same page set. The worker (`app/worker.py`) therefore chooses the mode per page: pages with invisible text use `ocr=2`, all others `ocr=0`. This makes scanned and mixed documents produce editable text, and is guarded by `tests/test_ocr_content.py`. For OCR'd pages the DOCX contains recognised text only, not the scan image.
+
 ### Important OCR limitation
 
 OCR makes scanned text searchable; it does not recreate the original Word structure. The OCR output is then passed to `pdf2docx`, which estimates paragraph, table, and image layout. Complex tables, multi-column pages, forms, unusual fonts, and low-quality scans will need occasional manual editing. This is normal for local/open-source PDF-to-DOCX conversion and should be documented for callers.
@@ -222,7 +228,7 @@ properties:
               concurrentRequests: "1"
     containers:
       - name: pdf-convert-api
-        image: <your-registry>/pdf-convert-api:<immutable-tag>
+        image: ghcr.io/pumpkindonutz/pdf-convert-api:<immutable-tag>
         resources:
           cpu: 0.5
           memory: 1Gi
@@ -242,7 +248,7 @@ Note: confirm the `memory: 1Gi` allocation against the worst-case fixture's peak
 Deployment instructions:
 
 1. Create an Azure resource group in the region nearest the callers.
-2. Create an Azure Container Registry or use another private registry supported by ACA. Prefer managed identity from ACA to ACR over registry passwords.
+2. Use GitHub Container Registry (`ghcr.io`) as the image registry; do not create an Azure Container Registry (cost precedence rule, section 2). GitHub Actions pushes with the built-in `GITHUB_TOKEN` (no stored credential). **Decision: the GHCR package (and, if needed, the repo) is public**, because private GHCR packages count against a small storage/transfer quota that a Tesseract-based image would exceed. ACA therefore needs no pull credential. This is acceptable only under these rules: never commit or bake secrets into the repo, image, build args, workflow files, or logs; `API_TOKENS` and any other secret live only in the ACA secret store (and GitHub Actions secrets for the three OIDC IDs); `.gitignore`/`.dockerignore` must exclude `.env`, key files, and test fixtures containing real documents; scan the diff for secrets before every push, since a public repo's history cannot be reliably un-published.
 3. Create the ACA environment and container app with the shape above.
 4. Add `API_TOKENS` as an ACA secret. Do not pass it as a build argument or bake it into an image.
 5. Set a spending budget and alerts before exposing the URL.
