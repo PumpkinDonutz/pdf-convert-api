@@ -2,7 +2,7 @@
 
 This is a step-by-step plan for standing up the full pipeline: you write/approve code locally with Claude Code, it gets pushed to a git remote, and from there it's built and deployed to Azure Container Apps (ACA) automatically. It's split into **things only you can do** (account creation, identity/consent steps that require your own login) and **things Claude can do for you afterward** (CLI setup, resource provisioning, workflow files) — so you know exactly what to hand off once each manual step is done.
 
-The end state: `git push` to your main branch → GitHub Actions builds the Docker image → pushes it to Azure Container Registry (ACR) → deploys a new revision to ACA. No manual `az` commands or portal clicks needed for routine changes after setup.
+The end state: `git push` to your main branch → GitHub Actions builds the Docker image → pushes it to GitHub Container Registry (GHCR) → deploys a new revision to ACA. No manual `az` commands or portal clicks needed for routine changes after setup.
 
 ## 0. What you need to create yourself (can't be delegated)
 
@@ -22,7 +22,7 @@ Install once, locally:
 | Tool | Purpose |
 | --- | --- |
 | [Docker Desktop](https://www.docker.com/products/docker-desktop/) (with WSL2 backend on Windows) | Build and smoke-test the container locally before it ever reaches Azure. |
-| [Azure CLI (`az`)](https://learn.microsoft.com/cli/azure/install-azure-cli) | Provision ACR, ACA, secrets, and budgets from the terminal. |
+| [Azure CLI (`az`)](https://learn.microsoft.com/cli/azure/install-azure-cli) | Provision ACA, secrets, and budgets from the terminal. |
 | [GitHub CLI (`gh`)](https://cli.github.com/) | Create the repo (if needed), set Actions secrets, open PRs, from the terminal. |
 | Git | Already required; confirm `git --version` works. |
 | Python 3.12 | For running the app and test suite outside Docker during day-to-day development. |
@@ -40,11 +40,13 @@ Both open a browser once; afterward Claude can run authenticated `az`/`gh` comma
 
 Once the accounts above exist and you're logged in via `az` and `gh`, this is the sequence Claude can run — each step is a small number of reviewable CLI commands, not a black box:
 
+**Standing rule: cost/price trumps all other preferences (including managed identity).** Prefer free tiers and free grants; flag any fixed monthly charge before creating the resource.
+
 ### 2.1 Resource group and registry
 
-- Create an Azure resource group in your preferred region.
-- Create an Azure Container Registry (ACR) in that group.
-- Enable an ACA-to-ACR managed identity pull (no registry password stored anywhere), as the design doc specifies.
+- Create a dedicated Azure resource group in West US (`westus`, falling back to `westus2`/`westus3` if Container Apps isn't available there).
+- Register the required resource providers (`Microsoft.App`, `Microsoft.OperationalInsights`). Free; just a subscription opt-in. `Microsoft.ContainerRegistry` is not needed.
+- **No Azure Container Registry** (no free tier). Images live in GHCR (`ghcr.io/pumpkindonutz/pdf-convert-api`). Actions pushes with `GITHUB_TOKEN`. The package is **public** (private GHCR has a small quota a Tesseract image would exceed), so ACA needs no pull credential. Secrets are kept out of the repo and image at all times: `API_TOKENS` lives only in the ACA secret store, and only the three non-secret OIDC IDs go in GitHub Actions secrets.
 
 ### 2.2 Container Apps environment and app
 
@@ -57,12 +59,12 @@ Once the accounts above exist and you're logged in via `az` and `gh`, this is th
 This is the piece that makes `git push` actually deploy. Recommended approach: **OpenID Connect (OIDC) federated credential** between GitHub Actions and Azure, instead of a long-lived service principal secret sitting in GitHub. Claude can:
 
 - Create an Azure AD app registration + federated credential scoped to this repo and branch.
-- Grant that identity just enough role (e.g. `AcrPush` on the registry, `Container Apps Contributor` on the resource group) — not subscription-wide `Owner`.
+- Grant that identity just enough role (`Container Apps Contributor` on the resource group; no `AcrPush` needed since the registry is GHCR) — not subscription-wide `Owner`.
 - Add the resulting IDs (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`) as GitHub Actions secrets via `gh secret set`.
 - Write a `.github/workflows/deploy.yml` that, on push to `main`:
   1. Builds the Docker image.
   2. Logs in to Azure via OIDC (no stored password).
-  3. Pushes the image to ACR with an immutable tag (e.g. the git SHA).
+  3. Pushes the image to GHCR (via `GITHUB_TOKEN`) with an immutable tag (e.g. the git SHA).
   4. Runs `az containerapp update` to point the app at the new image tag.
 
 No Azure credentials ever live in the repo itself — only the three non-secret IDs above, which identify the federated trust relationship (not a password).
@@ -84,7 +86,7 @@ No Azure credentials ever live in the repo itself — only the three non-secret 
 
 Per our standing agreement on risky/billable actions, Claude will pause for your confirmation before:
 
-- Creating any Azure resource that incurs cost (registry, container app, budget).
+- Creating any Azure resource that incurs cost (container app, Log Analytics, budget).
 - Granting any identity a role or permission.
 - Pushing to `main`, merging a PR, or triggering a deployment.
 - Rotating or removing an API token that active callers depend on.
@@ -96,7 +98,7 @@ Routine, reversible steps (reading current resource state, running local tests, 
 - [ ] You create the Azure account and subscription.
 - [ ] You create/confirm the GitHub repository.
 - [ ] You run `az login` and `gh auth login` locally, once.
-- [ ] Claude creates the resource group, ACR, and ACA environment (you approve each command).
+- [ ] Claude registers providers, then creates the resource group and ACA environment (you approve each command).
 - [ ] Claude sets up the OIDC federated credential and GitHub Actions secrets.
 - [ ] Claude writes `.github/workflows/deploy.yml` and the initial ACA container app definition.
 - [ ] You approve a budget + alert.

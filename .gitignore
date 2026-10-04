@@ -1,0 +1,18 @@
+# secrets / local config
+.env
+.env.*
+*.pem
+*.key
+secrets/
+.local/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# conversion artifacts / real documents
+*.docx
+/samples/
+/out/

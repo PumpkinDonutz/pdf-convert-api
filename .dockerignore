@@ -1,0 +1,16 @@
+.git
+.github
+.gitignore
+.env
+.env.*
+*.pem
+*.key
+secrets/
+.local/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.md
+samples/
+out/
