@@ -19,7 +19,15 @@ from .config import Settings
 from .conversion import convert, inspect_pdf
 from .gate import ConversionGate
 from .logs import log_request
-from .schemas import DOCX_MEDIA_TYPE, OCR_MODES, ApiError, internal_error, invalid_ocr_param
+from .schemas import (
+    DOCX_MEDIA_TYPE,
+    OCR_MODES,
+    ApiError,
+    client_disconnected,
+    internal_error,
+    invalid_ocr_param,
+    upload_timeout,
+)
 from .upload import receive_upload, safe_stem
 
 
@@ -39,6 +47,31 @@ class CleanupFileResponse(FileResponse):
             await super().__call__(scope, receive, send)
         finally:
             shutil.rmtree(self._workdir, ignore_errors=True)
+
+
+async def _wait_for_disconnect(request: Request) -> None:
+    """Block (no polling) until the server reports the client went away."""
+    while True:
+        message = await request.receive()
+        if message["type"] == "http.disconnect":
+            return
+
+
+async def _unless_disconnected(request: Request, work):
+    """Await `work`, cancelling it (which kills any child process group) if the client disconnects."""
+    task = asyncio.ensure_future(work)
+    watcher = asyncio.ensure_future(_wait_for_disconnect(request))
+    try:
+        await asyncio.wait({task, watcher}, return_when=asyncio.FIRST_COMPLETED)
+        if task.done():
+            return task.result()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise client_disconnected()
+    finally:
+        watcher.cancel()
+        if not task.done():
+            task.cancel()
 
 
 def _error_response(request: Request, exc: ApiError) -> JSONResponse:
@@ -107,31 +140,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise invalid_ocr_param()
         info["ocr_mode"] = ocr_mode
 
-        workdir = Path(tempfile.mkdtemp(prefix="pdfconv-"))
-        handed_off = False
-        try:
-            upload = await receive_upload(request, workdir / "input.pdf", settings.max_upload_bytes)
-            info["bytes"] = upload.size
-            info["pages"] = await asyncio.to_thread(inspect_pdf, workdir / "input.pdf", settings.max_pages)
+        with app.state.gate.admit():
+            workdir = Path(tempfile.mkdtemp(prefix="pdfconv-"))
+            handed_off = False
+            try:
+                try:
+                    async with asyncio.timeout(settings.upload_timeout_seconds):
+                        upload = await receive_upload(request, workdir / "input.pdf", settings.max_upload_bytes)
+                except TimeoutError:
+                    raise upload_timeout() from None
+                info["bytes"] = upload.size
 
-            async with app.state.gate.slot():
-                output = await convert(workdir, settings, ocr_mode)
+                async def process() -> Path:
+                    info["pages"] = await asyncio.to_thread(inspect_pdf, workdir / "input.pdf", settings.max_pages)
+                    async with app.state.gate.slot():
+                        return await convert(workdir, settings, ocr_mode)
 
-            response = CleanupFileResponse(
-                output,
-                media_type=DOCX_MEDIA_TYPE,
-                filename=f"{safe_stem(upload.filename)}.docx",
-                workdir=workdir,
-            )
-            handed_off = True
-            return response
-        except ApiError:
-            raise
-        except Exception as exc:
-            info["error_class"] = type(exc).__name__
-            raise internal_error() from exc
-        finally:
-            if not handed_off:
-                shutil.rmtree(workdir, ignore_errors=True)
+                output = await _unless_disconnected(request, process())
+
+                response = CleanupFileResponse(
+                    output,
+                    media_type=DOCX_MEDIA_TYPE,
+                    filename=f"{safe_stem(upload.filename)}.docx",
+                    workdir=workdir,
+                )
+                handed_off = True
+                return response
+            except ApiError:
+                raise
+            except Exception as exc:
+                info["error_class"] = type(exc).__name__
+                raise internal_error() from exc
+            finally:
+                if not handed_off:
+                    shutil.rmtree(workdir, ignore_errors=True)
 
     return app

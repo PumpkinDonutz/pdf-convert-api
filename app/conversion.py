@@ -16,6 +16,11 @@ from pathlib import Path
 
 import pymupdf
 
+try:  # POSIX only; the service runs on Linux, this keeps the module importable elsewhere
+    import resource
+except ImportError:  # pragma: no cover
+    resource = None
+
 from .config import Settings
 from .schemas import (
     ApiError,
@@ -27,11 +32,19 @@ from .schemas import (
     ocr_failed,
     ocr_timeout,
     page_limit_exceeded,
+    page_too_large,
 )
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 
 _OCR_FLAGS = {"auto": "--skip-text", "always": "--force-ocr"}
+
+# Largest page area accepted (PDF points^2, 72 pt = 1 in): about twice an A0 sheet.
+# Rasterising for OCR scales with page area, not file size, so a tiny PDF can
+# otherwise demand gigabytes.
+MAX_PAGE_AREA_PT2 = 16_000_000
+# Largest single file a child process may write; the kernel enforces it.
+MAX_CHILD_FILE_BYTES = 512 * 1024 * 1024
 
 
 def inspect_pdf(path: Path, max_pages: int) -> int:
@@ -54,9 +67,19 @@ def inspect_pdf(path: Path, max_pages: int) -> int:
             raise malformed_pdf()
         if pages > max_pages:
             raise page_limit_exceeded(max_pages)
+        for page in doc:
+            rect = page.rect
+            if rect.width * rect.height > MAX_PAGE_AREA_PT2:
+                raise page_too_large()
         return pages
     finally:
         doc.close()
+
+
+def _limit_child() -> None:
+    """Runs in the child between fork and exec."""
+    if resource is not None:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_CHILD_FILE_BYTES, MAX_CHILD_FILE_BYTES))
 
 
 def _kill_group(proc: asyncio.subprocess.Process) -> None:
@@ -76,6 +99,7 @@ async def _run(argv: list[str], *, env: dict[str, str], cwd: Path, timeout: floa
         cwd=cwd,
         env=env,
         start_new_session=True,
+        preexec_fn=_limit_child,
     )
     try:
         await asyncio.wait_for(proc.wait(), timeout=max(timeout, 0.001))
@@ -128,7 +152,10 @@ async def convert(workdir: Path, settings: Settings, ocr_mode: str) -> Path:
         source = ocr_out
 
     output = workdir / "output.docx"
-    argv = [sys.executable, "-m", "app.worker", str(source), str(output)]
+    argv = [sys.executable, "-m", "app.worker"]
+    if ocr_mode != "never":
+        argv.append("--ocr-ran")  # an invisible-text probe failure must not silently drop OCR text
+    argv += [str(source), str(output)]
     code = await _run(argv, env=env, cwd=APP_ROOT, timeout=deadline - time.monotonic())
     if code is None:
         raise conversion_failed("The conversion timed out.")

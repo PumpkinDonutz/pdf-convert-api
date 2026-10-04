@@ -18,6 +18,8 @@ from .schemas import empty_file, file_too_large, missing_file_field
 
 # Allowance for multipart framing and small non-file fields on top of the file cap.
 _OVERHEAD_ALLOWANCE = 64 * 1024
+# Cap on one part's header block; legitimate headers are a few hundred bytes.
+_MAX_PART_HEADER_BYTES = 8 * 1024
 
 
 @dataclass
@@ -44,25 +46,32 @@ async def receive_upload(request: Request, dest: Path, max_bytes: int) -> Upload
     if ctype != b"multipart/form-data" or not boundary:
         raise missing_file_field()
 
-    state = {"header_field": b"", "header_value": b"", "headers": {}, "out": None, "done": False}
+    state = {"header_field": bytearray(), "header_value": bytearray(), "headers": {}, "header_bytes": 0, "out": None, "done": False}
     result = UploadResult(size=0, filename=None)
 
     def on_part_begin() -> None:
         state["headers"] = {}
-        state["header_field"] = b""
-        state["header_value"] = b""
+        state["header_field"] = bytearray()
+        state["header_value"] = bytearray()
+        state["header_bytes"] = 0
         state["out"] = None
 
+    def append_header(key: str, data: bytes, start: int, end: int) -> None:
+        state["header_bytes"] += end - start
+        if state["header_bytes"] > _MAX_PART_HEADER_BYTES:
+            raise missing_file_field()
+        state[key].extend(data[start:end])
+
     def on_header_field(data: bytes, start: int, end: int) -> None:
-        state["header_field"] += data[start:end]
+        append_header("header_field", data, start, end)
 
     def on_header_value(data: bytes, start: int, end: int) -> None:
-        state["header_value"] += data[start:end]
+        append_header("header_value", data, start, end)
 
     def on_header_end() -> None:
-        state["headers"][state["header_field"].lower()] = state["header_value"]
-        state["header_field"] = b""
-        state["header_value"] = b""
+        state["headers"][bytes(state["header_field"]).lower()] = bytes(state["header_value"])
+        state["header_field"] = bytearray()
+        state["header_value"] = bytearray()
 
     def on_headers_finished() -> None:
         disposition = state["headers"].get(b"content-disposition")

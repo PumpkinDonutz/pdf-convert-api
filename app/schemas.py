@@ -56,6 +56,19 @@ def malformed_pdf() -> ApiError:
     return ApiError(422, "MALFORMED_PDF", "The PDF could not be read.")
 
 
+def page_too_large() -> ApiError:
+    return ApiError(422, "PAGE_TOO_LARGE", "The PDF contains a page whose dimensions are too large to process.")
+
+
+def upload_timeout() -> ApiError:
+    return ApiError(408, "UPLOAD_TIMEOUT", "The upload was not received in time.")
+
+
+def client_disconnected() -> ApiError:
+    # Never delivered (the peer is gone); exists so the request log records why work stopped.
+    return ApiError(499, "CLIENT_DISCONNECTED", "The client disconnected before the conversion finished.")
+
+
 def page_limit_exceeded(max_pages: int) -> ApiError:
     return ApiError(422, "PAGE_LIMIT_EXCEEDED", f"The PDF exceeds the {max_pages}-page limit.")
 

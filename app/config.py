@@ -40,13 +40,14 @@ class Settings:
     max_upload_bytes: int = 10 * MIB
     queue_size: int = 5
     retry_after_seconds: int = 30
+    upload_timeout_seconds: int = 120
 
     def __post_init__(self) -> None:
         if not self.api_tokens:
             raise ConfigError("API_TOKENS must contain at least one token")
         if any(len(t) < MIN_TOKEN_LENGTH for t in self.api_tokens):
             raise ConfigError(f"each API token must be at least {MIN_TOKEN_LENGTH} characters")
-        for name in ("conversion_timeout_seconds", "max_pages", "max_upload_bytes", "retry_after_seconds"):
+        for name in ("conversion_timeout_seconds", "max_pages", "max_upload_bytes", "retry_after_seconds", "upload_timeout_seconds"):
             if getattr(self, name) <= 0:
                 raise ConfigError(f"{name} must be positive")
         if self.queue_size < 0:
@@ -74,4 +75,5 @@ class Settings:
             ocr_language=env.get("OCR_LANGUAGE", "eng").strip() or "eng",
             queue_size=integer("QUEUE_SIZE", 5),
             retry_after_seconds=integer("RETRY_AFTER_SECONDS", 30),
+            upload_timeout_seconds=integer("UPLOAD_TIMEOUT_SECONDS", 120),
         )
