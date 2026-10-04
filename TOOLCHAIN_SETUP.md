@@ -74,6 +74,13 @@ No Azure credentials ever live in the repo itself — only the three non-secret 
 - Set an Azure spending budget and alert threshold on the resource group, per the design doc's cost warning.
 - Confirm `CONVERSION_TIMEOUT_SECONDS`, `MAX_PAGES`, and `API_TOKENS` are all set as intended before the first live smoke test.
 
+### 2.5 Setup notes learned during the first deploy
+
+- GitHub now issues OIDC subjects using immutable IDs (`repo:<owner>@<owner-id>/<repo>@<repo-id>:ref:refs/heads/main`). A federated credential using the plain `repo:<owner>/<repo>:...` form fails with `AADSTS700213`. Read the real subject from a failed `azure/login` log, or build it from the owner and repo IDs.
+- GitHub has no API to change a package's visibility. The package was published public by making the repo public first.
+- `az containerapp create` has no `--revision-mode` flag (Single is the default).
+- Live resources: resource group `pdf-convert-rg`, Log Analytics `pdf-convert-logs` (30-day retention, 0.1 GB/day cap), environment `pdf-convert-env`, app `pdf-convert-api`, budget `pdf-convert-budget` ($5/month).
+
 ## 3. Day-to-day workflow once this is set up
 
 1. You and Claude make changes locally, run tests, and smoke-test in Docker.
