@@ -83,6 +83,17 @@ app/schemas.py     error contract
 tests/             pytest suite (runs inside the image)
 ```
 
+## Deployment (live)
+
+- Azure Container Apps `pdf-convert-api` in resource group `pdf-convert-rg` (West US), Consumption plan, scale 0 to 3, one concurrent request per replica. Image: `ghcr.io/pumpkindonutz/pdf-convert-api:<git sha>` (public package).
+- Push to `main` runs `.github/workflows/deploy.yml`: tests, then build, push to GHCR, `az containerapp update`, and a `/healthz` check. Azure login uses OIDC (no stored Azure password); the federated credential is limited to `main` and uses GitHub's immutable-ID subject (`repo:<owner>@<id>/<repo>@<id>:ref:refs/heads/main`).
+- The `API_TOKENS` secret lives only in the ACA secret store. To rotate: add a new token to the secret, create a new revision, switch callers, then remove the old token.
+- Budget: $5/month on the resource group with email alerts (50%, 80%, 100% actual, 100% forecast).
+
+### Observed behaviour under load (verified against the live revision)
+
+Twelve simultaneous OCR requests against a cold single replica: 6 completed (1 active + 5 queued, serialised at about 6 s each) and 6 received `503 SERVER_BUSY` with `Retry-After: 30` within about 0.5 s. ACA scaled out to 3 replicas afterwards, but a burst that arrives before scale-out lands on the one existing replica, so the application queue and 503 are what a caller sees first. Callers should honour `Retry-After` and retry. Cold start from zero adds a few seconds to the first request.
+
 ## Operations notes
 
 - One Uvicorn worker per replica; ACA scales out via `maxReplicas`, one concurrent request per replica.
