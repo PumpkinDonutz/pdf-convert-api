@@ -29,11 +29,12 @@ Errors are JSON, `{"detail": "...", "code": "..."}`. Branch on `code`, not `deta
 | ---: | --- | --- |
 | 400 | `MISSING_FILE_FIELD` / `EMPTY_FILE` / `INVALID_OCR_PARAM` | bad request |
 | 401 | `MISSING_TOKEN` / `INVALID_TOKEN` | authentication (`WWW-Authenticate: Bearer`) |
+| 408 | `UPLOAD_TIMEOUT` | upload not fully received within `UPLOAD_TIMEOUT_SECONDS` |
 | 413 | `FILE_TOO_LARGE` | over 10 MiB (enforced while streaming) |
 | 415 | `NOT_A_PDF` | not a PDF |
-| 422 | `ENCRYPTED_PDF` / `MALFORMED_PDF` / `PAGE_LIMIT_EXCEEDED` | unusable PDF |
+| 422 | `ENCRYPTED_PDF` / `MALFORMED_PDF` / `PAGE_LIMIT_EXCEEDED` / `PAGE_TOO_LARGE` | unusable PDF (page area over about 2x A0) |
 | 422 | `OCR_FAILED` / `OCR_TIMEOUT` / `CONVERSION_FAILED` / `EMPTY_OUTPUT` | processing failure |
-| 503 | `SERVER_BUSY` | queue full; honour `Retry-After` |
+| 503 | `SERVER_BUSY` | queue or in-flight limit full (checked before the upload is read); honour `Retry-After` |
 | 500 | `INTERNAL_ERROR` | unexpected; quote the `X-Request-ID` response header |
 
 Every response carries an `X-Request-ID` header matching one structured log line.
@@ -55,6 +56,7 @@ PDFs are not supported.
 | `MAX_PAGES` | `200` | Hard cap, checked before any OCR or conversion. |
 | `OCR_LANGUAGE` | `eng` | Only English data is installed in the image. |
 | `QUEUE_SIZE` | `5` | Requests that may wait for the single conversion slot before `SERVER_BUSY`. |
+| `UPLOAD_TIMEOUT_SECONDS` | `120` | Deadline for receiving the whole upload (`408 UPLOAD_TIMEOUT`). |
 | `RETRY_AFTER_SECONDS` | `30` | Value of the `Retry-After` header on `SERVER_BUSY`. |
 
 The app refuses to start if the configuration is invalid.
@@ -98,5 +100,5 @@ Twelve simultaneous OCR requests against a cold single replica: 6 completed (1 a
 
 - One Uvicorn worker per replica; ACA scales out via `maxReplicas`, one concurrent request per replica.
 - Temp files live in a per-request directory under `/tmp` and are removed after success, error, timeout and client disconnect.
-- OCR and conversion run in their own process groups and are killed on timeout or cancellation (`tini` reaps them).
+- OCR and conversion run in their own process groups and are killed on timeout, or when the client disconnects (`tini` reaps them). Child processes cannot write any single file over 512 MiB.
 - Never commit tokens or real documents. `API_TOKENS` lives only in the ACA secret store.

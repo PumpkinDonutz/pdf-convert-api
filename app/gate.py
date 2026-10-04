@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 
 from .schemas import server_busy
+
+# Requests allowed to be uploading/inspecting beyond the running + queued conversions.
+_UPLOAD_SLACK = 2
 
 
 class ConversionGate:
@@ -13,6 +16,23 @@ class ConversionGate:
         self._waiting = 0
         self._queue_size = queue_size
         self._retry_after = retry_after_seconds
+        self._inflight = 0
+        self._max_inflight = 1 + queue_size + _UPLOAD_SLACK
+
+    @contextmanager
+    def admit(self):
+        """Bound requests in flight (uploading, inspecting, queued or converting).
+
+        Checked before any upload is read so excess clients cost one counter
+        comparison, not a temp directory and a PDF parse. Never blocks.
+        """
+        if self._inflight >= self._max_inflight:
+            raise server_busy(self._retry_after)
+        self._inflight += 1
+        try:
+            yield
+        finally:
+            self._inflight -= 1
 
     @asynccontextmanager
     async def slot(self):

@@ -1,6 +1,6 @@
 """PDF -> DOCX worker, run as a subprocess so it can be timed out and killed.
 
-Usage: python -m app.worker <input.pdf> <output.docx>
+Usage: python -m app.worker <input.pdf> <output.docx> [--ocr-ran]
 
 OCRmyPDF adds recognised text as an *invisible* layer (text render mode 3).
 pdf2docx ignores invisible text by default (``ocr=0``), so a scanned page would
@@ -21,20 +21,28 @@ logging.disable(logging.CRITICAL)
 INVISIBLE_TEXT = 3  # PyMuPDF get_texttrace() span type for render mode 3
 
 
-def page_has_invisible_text(page) -> bool:
+def page_has_invisible_text(page, strict: bool) -> bool:
+    """True if the page carries an invisible (OCR) text layer.
+
+    When OCR ran (`strict`), a failed probe raises so the request fails instead
+    of yielding a DOCX that silently lacks the OCR text. Otherwise a failure just
+    means "treat as native text", which is the pre-OCR behaviour.
+    """
     try:
         return any(span["type"] == INVISIBLE_TEXT for span in page.get_texttrace())
     except Exception:
+        if strict:
+            raise
         return False
 
 
-def convert(src: str, dst: str) -> None:
+def convert(src: str, dst: str, strict: bool = False) -> None:
     from pdf2docx import Converter
     from pdf2docx.page.RawPageFitz import RawPageFitz
 
     converter = Converter(src)
     try:
-        ocr_pages = {i for i, page in enumerate(converter.fitz_doc) if page_has_invisible_text(page)}
+        ocr_pages = {i for i, page in enumerate(converter.fitz_doc) if page_has_invisible_text(page, strict)}
         original = RawPageFitz._preprocess_text
 
         def per_page_mode(self, **settings):
@@ -48,9 +56,12 @@ def convert(src: str, dst: str) -> None:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 3:
+    args = argv[1:]
+    strict = "--ocr-ran" in args
+    args = [a for a in args if a != "--ocr-ran"]
+    if len(args) != 2:
         return 2
-    convert(argv[1], argv[2])
+    convert(args[0], args[1], strict)
     return 0
 
 
